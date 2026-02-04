@@ -11,8 +11,8 @@ from gymnax.environments.environment import (
 from gymnax.environments import spaces
 import jax.numpy as jnp
 
-PAIN_DELAY = 1
-PAIN_DURATION = 2
+PAIN_DELAY = 0
+PAIN_DURATION = 1
 PAIN_BUFFER_SIZE = PAIN_DELAY + PAIN_DURATION + 2
 
 
@@ -51,6 +51,8 @@ class EnvParams(BaseEnvParams):
         default_factory=lambda: jnp.array([0.25, 0.25, 0.25, 0.25])
     )
     clumpiness: float = 0.5  # between 0 and 1
+    can_sense_features: bool = True
+    can_sense_pain: bool = True
 
 
 class CustomEnv(Environment[EnvState, EnvParams]):
@@ -72,7 +74,17 @@ class CustomEnv(Environment[EnvState, EnvParams]):
     def get_obs(self, state: EnvState, params: EnvParams) -> jax.Array:
         """Get observation from the environment state."""
         resource_one_hot = jax.nn.one_hot(state.current_resource, len(ResourceType))
+        resource_one_hot = jnp.where(
+            params.can_sense_features,
+            resource_one_hot,
+            jnp.zeros_like(resource_one_hot),
+        )
         pain_signal = jnp.where(state.pain_level > 0.0, 1.0, 0.0)
+        pain_signal = jnp.where(
+            params.can_sense_pain,
+            pain_signal,
+            0.0,
+        )
         return jnp.concatenate([jnp.array([pain_signal]), resource_one_hot])
 
     def observation_space(self, params: EnvParams):

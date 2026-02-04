@@ -3,7 +3,7 @@
 This module implements a problem class for reinforcement learning optimization using
 the Gymnax library, which provides JAX-compatible RL environments.
 
-The GymnaxProblem class handles:
+The RNNGymnaxProblem class handles:
 - Environment setup and configuration
 - Policy network evaluation through environment rollouts
 - Tracking of environment interactions
@@ -31,9 +31,10 @@ class State(BaseState):
     obs_counter: int
     std_min: float
     std_max: float
+    rnn_state: PyTree | None = None
 
 
-class GymnaxProblem(Problem):
+class RNNGymnaxProblem(Problem):
     """Gymnax Problem for Reinforcement Learning Optimization."""
 
     def __init__(
@@ -58,15 +59,22 @@ class GymnaxProblem(Problem):
 
         # Instantiate environment and replace default parameters
         self.env, self.env_params = env_make_fn(**env_kwargs)
-        self.env_params.replace(**env_params)
+        self.env_params = self.env_params.replace(**env_params)
 
         # Test policy and env compatibility
         key = jax.random.key(0)
         obs, state = self.env.reset(key, self.env_params)
 
-        policy_params = self.policy.init(key, obs, key)
+        init_obs = obs.reshape(1, 1, *obs.shape)
+        init_rnn_state = self.policy.init_hidden_state(batch_size=1)
+        init_done = jnp.zeros((1, 1))
 
-        action = self.policy.apply(policy_params, obs, key)
+        policy_params = self.policy.init(key, key, init_obs, init_rnn_state, init_done)
+        action, _ = self.policy.apply(
+            policy_params, key, init_obs, init_rnn_state, init_done
+        )
+        action = action.squeeze()
+
         self.env.step(key, state, action, self.env_params)
 
         # Set number of environment steps
@@ -143,9 +151,10 @@ class GymnaxProblem(Problem):
 
         # Reset environment
         obs, env_state = self.env.reset(key_reset, self.env_params)
+        init_rnn_state = self.policy.init_hidden_state(batch_size=1)
 
         def _step(carry, key):
-            obs, env_state, cum_reward, valid = carry
+            obs, env_state, cum_reward, valid, rnn_state, done = carry
 
             key_action, key_step = jax.random.split(key)
 
@@ -153,7 +162,12 @@ class GymnaxProblem(Problem):
             obs = self.normalize_obs(obs, state) if self.use_normalize_obs else obs
 
             # Sample action from policy
-            action = self.policy.apply(policy_params, obs, key_action)
+            obs_ = obs.reshape(1, 1, *obs.shape)
+            done_ = done.reshape(1, 1)
+            action, new_rnn_state = self.policy.apply(
+                policy_params, key_action, obs_, rnn_state, done_
+            )
+            action = action.squeeze()
 
             # Step environment
             obs, env_state, reward, done, _ = self.env.step(
@@ -168,6 +182,8 @@ class GymnaxProblem(Problem):
                 env_state,
                 cum_reward,
                 valid,
+                new_rnn_state,
+                done,
             )
             return carry, (obs, env_state)
 
@@ -180,6 +196,8 @@ class GymnaxProblem(Problem):
                 env_state,
                 jnp.array(0.0),
                 jnp.array(1.0),
+                init_rnn_state,
+                jnp.array(False),
             ),
             xs=keys,
         )
@@ -256,4 +274,10 @@ class GymnaxProblem(Problem):
         """Sample a solution in the search space."""
         key_init, key_sample, key_input = jax.random.split(key, 3)
         obs = self.observation_space.sample(key_sample)
-        return self.policy.init(key_init, obs, key_input)
+        init_obs = obs.reshape(1, 1, *obs.shape)
+        init_rnn_state = self.policy.init_hidden_state(batch_size=1)
+        init_done = jnp.zeros((1, 1))
+
+        return self.policy.init(
+            key_init, key_input, init_obs, init_rnn_state, init_done
+        )
